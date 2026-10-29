@@ -1,0 +1,21 @@
+# OMNeT++ build output
+out/
+*.exe
+*.o
+*.obj
+*.d
+
+# Generated simulation results
+results/
+local_sharing_sweep_results/
+*.sca
+*.vec
+*.vci
+*.elog
+
+# Large generated analysis output
+deltaTLS_vs_simTime.csv
+
+# Python cache
+__pycache__/
+*.pyc
