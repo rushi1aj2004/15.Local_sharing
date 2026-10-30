@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <fstream>
+#include <string>
 
 using namespace omnetpp;
 
@@ -25,7 +26,7 @@ class ONU : public cSimpleModule
     double moff = 0.0;
     double paretoA = 1e-12;
     double paretoB = 1.0;
-    double alphaOn = 1.5;
+    double alphaOn = 1.2;
     double alphaOff = 1.4;
     
     cPacket *pendingReport = nullptr;
@@ -132,10 +133,17 @@ void ONU::initialize()
     scheduleAt(simTime() + sampleParetoDuration(mon, alphaOn), trafficStateMsg);
     scheduleAt(simTime(), generateMsg);
 
-    reportTurnaroundFile.open("report_turnaround.csv");
+    // Keep each ONU's measurements in a separate file; otherwise each ONU
+    // opening the same filename could truncate another ONU's data.
+    const std::string turnaroundFilename =
+        "report_turnaround_ONU_" +
+        std::to_string(par("onuId").intValue()) +
+        ".csv";
+
+    reportTurnaroundFile.open(turnaroundFilename);
 
     if (!reportTurnaroundFile.is_open())
-        throw cRuntimeError("Cannot open report_turnaround.csv");
+        throw cRuntimeError("Cannot open %s", turnaroundFilename.c_str());
 
     reportTurnaroundFile
         << "onuId,reportedBytes,reportTxStart_s,gateArrival_s,turnAroundTime_s\n";
@@ -441,6 +449,32 @@ void ONU::handleMessage(cMessage *msg)
             return;
         }
 
+        // Record the first GATE addressed to this ONU after REPORT transmission.
+        if (awaitingGateForReport)
+        {
+            const simtime_t gateArrival = simTime();
+            const simtime_t turnAroundTime =
+                gateArrival - currentReportTxStart;
+
+            reportTurnaroundFile
+                << par("onuId").intValue() << ","
+                << currentReportedBytes << ","
+                << currentReportTxStart.dbl() << ","
+                << gateArrival.dbl() << ","
+                << turnAroundTime.dbl() << "\n";
+            reportTurnaroundFile.flush();
+
+            EV_INFO << "ONU " << par("onuId").intValue()
+                    << " REPORT-to-GATE turnaround"
+                    << " | Reported bytes = " << currentReportedBytes
+                    << " | REPORT TX start = " << currentReportTxStart
+                    << " | GATE arrival = " << gateArrival
+                    << " | Turnaround = " << turnAroundTime
+                    << endl;
+
+            awaitingGateForReport = false;
+        }
+
         int mode = (int)msg->par("mode").longValue();
         int hostId = (int)msg->par("hostId").longValue();
 
@@ -556,6 +590,12 @@ void ONU::handleMessage(cMessage *msg)
                     << " sending REPORT"
                     << " | Mode = " << grantMode
                     << endl;
+
+            // Start timing at the actual REPORT send event, after serialization.
+            currentReportTxStart = simTime();
+            currentReportedBytes =
+                pendingReport->par("queueBytes").longValue();
+            awaitingGateForReport = true;
 
             if (grantMode == 1)
             {
@@ -757,4 +797,7 @@ void ONU::finish()
     }
     recordScalar("Packets Created", packetsCreated);
     recordScalar("Packets Dropped", packetsDropped);
+
+    if (reportTurnaroundFile.is_open())
+        reportTurnaroundFile.close();
 }

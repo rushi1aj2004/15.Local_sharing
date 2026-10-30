@@ -644,91 +644,104 @@ bool OLT::scheduleDynamicLocalSharing()
             << ", reported queue = " << queueBytes[hostId]
             << " bytes" << endl;
     
-    //NEWADDITION
-    // Filter candidates that cannot fit a valid DATA + REPORT + guard slot.
-    const SimTime availableWindow = rightLimit - horizonLS;
-    std::vector<int> viableCandidates;
+    // //NEWADDITION
+    // // Filter candidates that cannot fit a valid DATA + REPORT + guard slot.
+    // const SimTime availableWindow = rightLimit - horizonLS;
+    // std::vector<int> viableCandidates;
     
-    for (int candidateId : candidates)
-    {
-        if (candidateId == hostId)
-            continue;
+    // for (int candidateId : candidates)
+    // {
+    //     if (candidateId == hostId)
+    //         continue;
     
-        const long expectedGrantBytes =
-            alignedGrantBytes(queueBytes[candidateId]);
+    //     const long expectedGrantBytes =
+    //         alignedGrantBytes(queueBytes[candidateId]);
     
-        const SimTime availableDataTime =
-            rightLimit - horizonLS - reportTxTime - guardTime;
+    //     const SimTime availableDataTime =
+    //         rightLimit - horizonLS - reportTxTime - guardTime;
     
-        if (availableDataTime <= SIMTIME_ZERO)
-            continue;
+    //     if (availableDataTime <= SIMTIME_ZERO)
+    //         continue;
     
-        const SimTime expectedDataTxTime =
-            secondsToSimTime(expectedGrantBytes * 8.0 / dataRate);
+    //     const SimTime expectedDataTxTime =
+    //         secondsToSimTime(expectedGrantBytes * 8.0 / dataRate);
     
-        if (expectedDataTxTime <= availableDataTime)
-            viableCandidates.push_back(candidateId);
-    }
+    //     if (expectedDataTxTime <= availableDataTime)
+    //         viableCandidates.push_back(candidateId);
+    // }
     
-    candidates = std::move(viableCandidates);
+    // candidates = std::move(viableCandidates);
 
 
-    if (candidates.empty())
-    {
-        // Issue the Host's ordinary upstream grant here.
-        // Update the relevant scheduling state/horizon.
-        long grantBytes =
-        alignedGrantBytes(queueBytes[hostId]);
-        isScheduled[hostId] = true;
-        sendGrantForONU(hostId, grantBytes);
+    // if (candidates.empty())
+    // {
+    //     // Issue the Host's ordinary upstream grant here.
+    //     // Update the relevant scheduling state/horizon.
+    //     long grantBytes =
+    //     alignedGrantBytes(queueBytes[hostId]);
+    //     isScheduled[hostId] = true;
+    //     sendGrantForONU(hostId, grantBytes);
 
-        if (!scheduleMsg->isScheduled())
-            scheduleAt(simTime(), scheduleMsg);
+    //     if (!scheduleMsg->isScheduled())
+    //         scheduleAt(simTime(), scheduleMsg);
 
-        return false;
-    }
-    //NEWADDITION END
-
+    //     return false;
+    // }
+    // //NEWADDITION END
     
     const long hostGrantBytes = alignedGrantBytes(queueBytes[hostId]);
 
     //We can't Restrict upperlimit for the policy which favours those with higher data
-    //Restrict the No of contributors to int(hostBurst/guard)+1
+    // Restrict the No of contributors to int(hostBurst/guard)+1
     // Restrict the number of contributors based on the Host's DATA burst time.
-    // const SimTime hostDataBurst =
-    //     secondsToSimTime(hostGrantBytes * 8.0 / dataRate);
 
-    // int maxContributors = 0;
+    const SimTime hostDataBurst =
+        secondsToSimTime(hostGrantBytes * 8.0 / dataRate);
 
-    // if (guardTime > SIMTIME_ZERO)
-    // {
-    //     maxContributors =
-    //         static_cast<int>(std::floor(
-    //             hostDataBurst.dbl() / guardTime.dbl())) + 1;
-    // }
-    // else
-    // {
-    //     // Avoid division by zero when guardTime is zero.
-    //     maxContributors = static_cast<int>(candidates.size());
-    // }
+    int maxContributors = 0;
 
-    // // Do not exceed the number of available non-Host candidates.
-    // const int availableContributors = static_cast<int>(
-    //     std::count_if(
-    //         candidates.begin(),
-    //         candidates.end(),
-    //         [hostId](int id) { return id != hostId; }));
+    if (guardTime > SIMTIME_ZERO)
+    {
+        maxContributors =
+            static_cast<int>(std::floor(
+                hostDataBurst.dbl() / guardTime.dbl())) + 1;
+    }
+    else
+    {
+        // Avoid division by zero when guardTime is zero.
+        maxContributors = static_cast<int>(candidates.size());
+    }
 
-    // maxContributors = std::min(maxContributors, availableContributors);
+    // Do not exceed the number of available non-Host candidates.
+    const int availableContributors = static_cast<int>(
+        std::count_if(
+            candidates.begin(),
+            candidates.end(),
+            [hostId](int id) { return id != hostId; }));
 
-    // EV_INFO << "Host DATA burst = " << hostDataBurst
-    //         << "\nMaximum permitted contributors = " << maxContributors
-    //         << endl;
+    maxContributors = std::min(maxContributors, availableContributors);
+
+    EV_INFO << "Host DATA burst = " << hostDataBurst
+            << "\nMaximum permitted contributors = " << maxContributors
+            << endl;
 
     
     
     // Stage C: process contributors in decreasing queue order and fit
     // each DATA + REPORT + guard slot into the remaining LS window.
+
+    // Reverse candidates: lowest reported bytes first.
+    //If we limit the no of contributors then its absolutely necessary to start from the lowest reported bytes First
+    std::reverse(candidates.begin(), candidates.end());
+    
+
+    for (int candidateId : candidates)
+    {
+        const long expectedGrantBytes =
+            alignedGrantBytes(queueBytes[candidateId]);
+    
+        EV_INFO<<"Reported Bytes: "<<expectedGrantBytes<<"\nONU id: "<<candidateId<<endl;
+    }
     int contributorsScheduled = 0;
     
     for (int contributorId : candidates)
@@ -736,9 +749,9 @@ bool OLT::scheduleDynamicLocalSharing()
         if (contributorId == hostId)
             continue;
 
-        // // Enforce the contributor limit.
-        // if (contributorsScheduled >= maxContributors)
-        //     break;
+        // Enforce the contributor limit.
+        if (contributorsScheduled >= maxContributors)
+            break;
 
         const SimTime contributorDelay =
             secondsToSimTime(rnToONUDelays[contributorId]);

@@ -12,10 +12,10 @@ OUT_ROOT="local_sharing_sweep_results"
 MAX_PARALLEL="${1:-4}"
 
 NUM_ONUS=300
-# GRANTS=(6250 12500 25000 50000)
-GRANTS=(100000 200000 400000)
-#LOADS=(0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1.0)
-LOADS=(1.0)
+GRANTS=(6250 12500 25000 50000)
+#GRANTS=(100000 200000 400000)
+LOADS=(0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1.0)
+#LOADS=(1.0)
 if [[ ! -f "$BASE_INI" ]]; then
     echo "ERROR: $BASE_INI not found in $(pwd)"
     exit 1
