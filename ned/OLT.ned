@@ -16,7 +16,8 @@ simple OLT
         double maxCycleTime @unit(s) = default(400us);
         double guardTime @unit(s) = default(1us);
         int reportSizeBytes = default(64);
-
+        double lowlimWindow @unit(s) = default(40us); 
+        int maxONUFullWindow = default(100);
     gates:
         input in;
         output grantOut;

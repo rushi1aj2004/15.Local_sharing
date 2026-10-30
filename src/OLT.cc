@@ -26,7 +26,8 @@ class OLT : public cSimpleModule
 
     int numONUs = 0;
     bool initialScheduleDone = false;
-
+    SimTime lowlimWindow;
+    int maxONUFullWindow;
     SimTime horizonUP = SIMTIME_ZERO;
     SimTime horizonLS = SIMTIME_ZERO;
 
@@ -48,6 +49,8 @@ class OLT : public cSimpleModule
 
     std::vector<long> queueBytes;
     std::vector<bool> isScheduled;
+    std::vector<bool> RemainingIncycle;
+    std::vector<bool> hostsUsedtoEmptyRemainingONU;
     std::vector<double> rnToONUDelays;
 
     std::vector<bool> initialReportReceived;
@@ -115,6 +118,8 @@ void OLT::initialize()
     cModule *network = getParentModule();
 
     numONUs = par("numONUs").intValue();
+    lowlimWindow = par("lowlimWindow");
+    maxONUFullWindow = par("maxONUFullWindow").intValue();
 
     if (numONUs < 6)
         throw cRuntimeError(
@@ -184,6 +189,8 @@ void OLT::initialize()
 
     queueBytes.assign(numONUs, 0);
     isScheduled.assign(numONUs, false);
+    RemainingIncycle.assign(numONUs, true);
+    hostsUsedtoEmptyRemainingONU.assign(numONUs, false);
     initialReportReceived.assign(numONUs, false);
     initialReportsRemaining = numONUs;
 
@@ -626,6 +633,25 @@ bool OLT::scheduleDynamicLocalSharing()
         }
     }
     
+    // Record Hosts that have already contributed during this cycle.
+    if (!RemainingIncycle[hostId])
+        hostsUsedtoEmptyRemainingONU[hostId] = true;
+    else
+        RemainingIncycle[hostId] = false;
+    
+    // Refresh an exhausted cycle before selecting its contributors.
+    if (std::none_of(RemainingIncycle.begin(), RemainingIncycle.end(),
+                     [](bool remaining) { return remaining; }))
+    {
+        for (int i = 0; i < numONUs; ++i)
+        {
+            RemainingIncycle[i] =
+                !(RemainingIncycle[i] || hostsUsedtoEmptyRemainingONU[i]);
+            hostsUsedtoEmptyRemainingONU[i] = false;
+        }
+        EV_INFO << "Contributor eligibility cycle refreshed." << endl;
+    }
+
     //Delay Experienced by packet from splitter to the OLT
     SimTime DelayExperiencedByPacket = horizonUP - horizonLS;
 
@@ -744,15 +770,22 @@ bool OLT::scheduleDynamicLocalSharing()
     }
     int contributorsScheduled = 0;
     
+    deltaTLS =
+                    horizonUP
+                    - SimTime(125, SIMTIME_US)
+                    - horizonLS;
     for (int contributorId : candidates)
     {
         if (contributorId == hostId)
             continue;
+        if (!RemainingIncycle[contributorId])
+            continue;
 
-        // Enforce the contributor limit.
-        if (contributorsScheduled >= maxContributors)
-            break;
-
+        if(deltaTLS < lowlimWindow || contributorsScheduled>=maxONUFullWindow)
+        {// Enforce the contributor limit.
+            if (contributorsScheduled >= maxContributors)
+                break;
+        }
         const SimTime contributorDelay =
             secondsToSimTime(rnToONUDelays[contributorId]);
 
@@ -797,6 +830,7 @@ bool OLT::scheduleDynamicLocalSharing()
 
         // Commit the contributor's REPORT to this LS reservation.
         isScheduled[contributorId] = true;
+        RemainingIncycle[contributorId] = false;
         committedContributors.push_back(contributorId);
 
         sendGrantMessage(
@@ -824,6 +858,19 @@ bool OLT::scheduleDynamicLocalSharing()
                 << contributorSlotDuration
                 << "\nLS reservation end = " << lsCursor
                 << endl;
+    }
+
+    // Refresh the cycle immediately after the last eligible ONU contributes.
+    if (std::none_of(RemainingIncycle.begin(), RemainingIncycle.end(),
+                     [](bool remaining) { return remaining; }))
+    {
+        for (int i = 0; i < numONUs; ++i)
+        {
+            RemainingIncycle[i] =
+                !(RemainingIncycle[i] || hostsUsedtoEmptyRemainingONU[i]);
+            hostsUsedtoEmptyRemainingONU[i] = false;
+        }
+        EV_INFO << "Contributor eligibility cycle refreshed." << endl;
     }
 
     // A Host-only reservation is not Local Sharing. Leave its REPORT

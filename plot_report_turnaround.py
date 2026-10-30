@@ -31,7 +31,7 @@ data = data.dropna(subset=[
 ])
 
 # Find measurements exceeding 1 ms
-threshold = 0.001
+threshold = 0.010
 
 exceeded = data[data["turnAroundTime_s"] > threshold]
 
@@ -51,7 +51,7 @@ plt.scatter(
     exceeded["turnAroundTime_s"],
     s=20,
     color="red",
-    label="Turnaround Time > 1 ms"
+    label="Turnaround Time > 10 ms"
 )
 
 plt.axhline(

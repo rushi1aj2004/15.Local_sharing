@@ -13,6 +13,7 @@ local_sharing_sweep_results/
 *.vci
 *.elog
 
+*.csv
 # Large generated analysis output
 deltaTLS_vs_simTime.csv
 

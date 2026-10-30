@@ -3,7 +3,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 CSV_FILE = "deltaTLS_vs_simTime.csv"
-STRIDE = 1000
+STRIDE = 100
 CHUNK_SIZE = 200_000
 
 sampled_time = []
