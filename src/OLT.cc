@@ -858,6 +858,7 @@ bool OLT::scheduleDynamicLocalSharing()
                 << contributorSlotDuration
                 << "\nLS reservation end = " << lsCursor
                 << endl;
+        contributorsScheduled++;
     }
 
     // Refresh the cycle immediately after the last eligible ONU contributes.

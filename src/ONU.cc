@@ -43,6 +43,11 @@ class ONU : public cSimpleModule
     // Mode 2 sends the Host's own REPORT before its own DATA burst.
     bool hostReportSentBeforeData = false;
 
+    // After the Host REPORT is sent, the Host is free to accept a new GATE
+    // from the OLT, but must finish the previous Mode 2 continuation first.
+    // Keep the arriving GATE intact until the previous Host work is complete.
+    bool hostPostReportActive = false;
+    cMessage *deferredGrant = nullptr;
 
     long grantBitsRemaining = 0;
     long long packetsCreated = 0;
@@ -75,6 +80,7 @@ class ONU : public cSimpleModule
     long calculateSendableOwnBytes(long availableGrantBits) const;
     long getQueuedBytes() const;
     void transmitNextLocalSharingPacket();
+    void resumeDeferredGrant();
     simtime_t sampleParetoDuration(double scaleSeconds, double alpha);
 };
 
@@ -127,6 +133,9 @@ void ONU::initialize()
 
     grantMode = 0;
     grantHostId = -1;
+    hostReportSentBeforeData = false;
+    hostPostReportActive = false;
+    deferredGrant = nullptr;
 
     EV_INFO << "ONU " << par("onuId").intValue()
             << " initialized"
@@ -379,6 +388,33 @@ void ONU::transmitNextLocalSharingPacket()
 }
 
 
+// Resume a GATE that arrived while the Host was finishing the previous
+// Mode 2 post-REPORT work. Its original requested start time is preserved.
+void ONU::resumeDeferredGrant()
+{
+    if (deferredGrant == nullptr)
+        return;
+
+    const SimTime readyAt =
+        SimTime(deferredGrant->par("deferredReadyAt").doubleValue(), SIMTIME_S);
+
+    // The stored GATE's delay_after_rec_grant is set to zero when deferred,
+    // because its original delay is represented by deferredReadyAt.
+    const SimTime resumeAt = std::max(simTime(), readyAt);
+
+    cMessage *grant = deferredGrant;
+    deferredGrant = nullptr;
+
+    EV_INFO << "ONU " << par("onuId").intValue()
+            << " resuming deferred GATE"
+            << " | Original ready time = " << readyAt
+            << " | Resume time = " << resumeAt
+            << endl;
+
+    scheduleAt(resumeAt, grant);
+}
+
+
 // Drop expired packets from this ONU's own DATA queue before preparing
 // the Host's pre-DATA REPORT.
 void ONU::dropExpiredOwnPackets()
@@ -581,9 +617,7 @@ void ONU::handleMessage(cMessage *msg)
             );
         }
 
-        if (grantActive ||
-            waitingToSendReport ||
-            transmitMsg->isScheduled())
+        if (grantActive || waitingToSendReport || deferredGrant != nullptr)
         {
             long long onuId =
                 (long long)par("onuId").intValue();
@@ -591,11 +625,46 @@ void ONU::handleMessage(cMessage *msg)
             delete msg;
 
             throw cRuntimeError(
-                "ONU %lld received a GATE before its previous grant finished",
+                "ONU %lld received an overlapping GATE while another grant/REPORT was active",
                 onuId
             );
         }
 
+        // The Host REPORT has already been sent, so the ONU may accept a new
+        // GATE immediately. However, the previous Mode 2 transaction still
+        // has to drain DataBuffers and transmit the previous grant's own DATA.
+        // Defer execution of the new GATE so it cannot overwrite that state.
+        if (hostPostReportActive)
+        {
+            const double delaySeconds =
+                msg->par("delay_after_rec_grant").doubleValue();
+
+            const SimTime requestedReadyAt =
+                simTime() + SimTime(delaySeconds, SIMTIME_S);
+
+            msg->addPar("deferredReadyAt");
+            msg->par("deferredReadyAt").setDoubleValue(
+                requestedReadyAt.dbl()
+            );
+
+            // The GATE will be scheduled at deferredReadyAt later. Avoid
+            // applying delay_after_rec_grant a second time when it resumes.
+            msg->par("delay_after_rec_grant").setDoubleValue(0.0);
+
+            deferredGrant = msg;
+
+            EV_INFO << "ONU " << par("onuId").intValue()
+                    << " accepted a new GATE while finishing previous Host work"
+                    << " | New GATE will be processed at/after "
+                    << requestedReadyAt
+                    << " | Previous grant remaining = "
+                    << grantBitsRemaining << " bits"
+                    << endl;
+            return;
+        }
+
+        // A scheduled Transmit event is expected for an active grant. The
+        // grantActive/waitingToSendReport checks above protect normal overlap.
         long grantBytes =
             msg->par("grantBytes").longValue();
 
@@ -693,16 +762,23 @@ void ONU::handleMessage(cMessage *msg)
 
             if (grantMode == 2 && hostReportSentBeforeData)
             {
-                // Keep the Host grant active and continue with own DATA.
+                // The Host's REPORT has reached the upstream path. Release
+                // grantActive so a newly arriving GATE can be accepted, while
+                // retaining the previous Mode 2 state and grant allowance.
+                hostPostReportActive = true;
+                grantActive = false;
+
+                // Continue the previous Host transaction using its preserved
+                // grantBitsRemaining, grantMode, and Local Sharing buffers.
                 scheduleAt(simTime(), transmitMsg);
             }
             else
             {
                 // Modes 0 and 1 complete after their DATA-then-REPORT flow.
-            grantActive = false;
-            grantBitsRemaining = 0;
-            sendingLocalSharingBuffer = false;
-            grantHostId = -1;
+                grantActive = false;
+                grantBitsRemaining = 0;
+                sendingLocalSharingBuffer = false;
+                grantHostId = -1;
                 grantMode = 0;
             }
 
@@ -740,7 +816,7 @@ void ONU::handleMessage(cMessage *msg)
 
                 hostReportSentBeforeData = true;
 
-            EV_INFO << "Host ONU " << par("onuId").intValue()
+                EV_INFO << "Host ONU " << par("onuId").intValue()
                         << " preparing REPORT after collected REPORTs"
                         << " | Current own queue = " << currentQueueBytes
                         << " bytes"
@@ -750,7 +826,7 @@ void ONU::handleMessage(cMessage *msg)
                         << " bytes"
                         << " | Queue reported to OLT = "
                         << remainingQueueBytes << " bytes"
-                    << endl;
+                        << endl;
 
                 prepareReport(remainingQueueBytes);
                 return;
@@ -801,7 +877,7 @@ void ONU::handleMessage(cMessage *msg)
         else
         {
             dropExpiredOwnPackets();
-            }
+        }
 
         if (grantActive && !queue.empty())
         {
@@ -876,11 +952,17 @@ void ONU::handleMessage(cMessage *msg)
             grantHostId = -1;
             grantMode = 0;
             hostReportSentBeforeData = false;
+            hostPostReportActive = false;
+
+            // The old Host transaction is now completely finished. A GATE
+            // received after the Host REPORT can safely begin now, subject
+            // to its original delay_after_rec_grant.
+            resumeDeferredGrant();
         }
         else
         {
             // Preserve the original DATA-then-REPORT behavior for Modes 0/1.
-        prepareReport();
+            prepareReport();
         }
 
         return;
@@ -905,6 +987,14 @@ void ONU::finish()
     {
         delete pendingReport;
         pendingReport = nullptr;
+    }
+
+    if (deferredGrant != nullptr)
+    {
+        if (deferredGrant->isScheduled())
+            cancelEvent(deferredGrant);
+        delete deferredGrant;
+        deferredGrant = nullptr;
     }
 
     while (!queue.empty())
