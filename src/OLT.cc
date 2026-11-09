@@ -46,6 +46,14 @@ class OLT : public cSimpleModule
     long totalDataPacketsReceived = 0;
     SimTime totalPacketDelay = SIMTIME_ZERO;
 
+    //GPT_ADDITION
+    long long normalUpstreamsScheduled = 0;
+    //GPT_ADDITION_END
+
+    //GPT_ADDITION
+    long long totalUpstreamGuardsScheduled = 0;
+    //GPT_ADDITION_END
+
 
     std::vector<long> queueBytes;
     std::vector<bool> isScheduled;
@@ -55,6 +63,10 @@ class OLT : public cSimpleModule
 
     std::vector<bool> initialReportReceived;
     int initialReportsRemaining = 0;
+
+    //GPT_ADDITION
+    std::ofstream localSharingTimingFile;
+    //GPT_ADDITION_END
 
     int initialHostId = -1;
     std::vector<int> initialLSGroup;
@@ -219,6 +231,18 @@ void OLT::initialize()
 
     deltaTLSFile << "simTime_s,deltaTLS_s\n";
     deltaTLSFile << std::setprecision(15);
+
+    //GPT_ADDITION
+    localSharingTimingFile.open("local_sharing_timing.csv");
+
+    if (!localSharingTimingFile.is_open())
+        throw cRuntimeError("Could not open local_sharing_timing.csv");
+
+    localSharingTimingFile
+        << "simulationTime_s,hostOwnDataTime_s,contributorsScheduled,"
+        << "deltaTLSMinusForwardingTime_s\n";
+    localSharingTimingFile << std::setprecision(15);
+    //GPT_ADDITION_END
 }
 
 
@@ -275,6 +299,12 @@ void OLT::sendGrantMessage(
             << endl;
 
     send(grant, "grantOut");
+
+    //GPT_ADDITION
+    // The Mode 2 Host reservation also carries one upstream guard.
+    if (mode == 2)
+        totalUpstreamGuardsScheduled++;
+    //GPT_ADDITION_END
 }
 
 
@@ -311,6 +341,14 @@ void OLT::sendGrantForONU(int onuId, long grantBytes)
         delayAfterGrant,
         SimTime(0,SIMTIME_US)
     );
+
+    //GPT_ADDITION
+    // sendGrantForONU schedules a normal upstream reservation with one guard.
+    totalUpstreamGuardsScheduled++;
+
+    if (phase == SchedulerPhase::STEADY_STATE)
+        normalUpstreamsScheduled++;
+    //GPT_ADDITION_END
 
     SimTime dataTxTime =
         secondsToSimTime(grantBytes * 8.0 / dataRate);
@@ -384,10 +422,9 @@ void OLT::selectInitialLocalSharingGroup()
 
     SimTime now = simTime();
 
-    horizonLS = now + SimTime(350+125, SIMTIME_US);
+    horizonLS = now + SimTime(125, SIMTIME_US);
 
     horizonUP = now
-            +SimTime(350, SIMTIME_US)
             + SimTime(125, SIMTIME_US)
             + SimTime(20, SIMTIME_US)
             + SimTime(125, SIMTIME_US);
@@ -399,7 +436,7 @@ void OLT::selectInitialLocalSharingGroup()
 
     // Enter the existing dynamic scheduling logic.
     phase = SchedulerPhase::STEADY_STATE;
-    scheduleAt(now + SimTime(350, SIMTIME_US), scheduleMsg);
+    scheduleAt(simTime(), scheduleMsg);
 }
 
 // Dynamic upstream-only Local Sharing scheduler.
@@ -416,14 +453,14 @@ bool OLT::scheduleDynamicLocalSharing()
     SimTime rightLimit = horizonUP - jitOffset;
     SimTime deltaTLS = rightLimit - horizonLS;
 
-    //Write deltaTLS and simTime to file
-    if (deltaTLSFile.is_open())
-    {
-        deltaTLSFile << now.dbl() << ","
-                    << deltaTLS.dbl()*1e6 << "\n";
+    // //Write deltaTLS and simTime to file
+    // if (deltaTLSFile.is_open())
+    // {
+    //     deltaTLSFile << now.dbl() << ","
+    //                 << deltaTLS.dbl()*1e6 << "\n";
 
-        deltaTLSFile.flush();
-    }
+    //     deltaTLSFile.flush();
+    // }
 
     SimTime SinglePacketTime =secondsToSimTime(static_cast<double>(packetSizeBytes) * 8.0 / dataRate);
 
@@ -476,7 +513,7 @@ bool OLT::scheduleDynamicLocalSharing()
     }
 
     // Stage B: eligible Host candidates are fresh, unconsumed reports
-    // with at least one complete DATA packet available for a grant.
+    
     std::vector<int> candidates;
     candidates.reserve(numONUs);
 
@@ -670,50 +707,51 @@ bool OLT::scheduleDynamicLocalSharing()
             << ", reported queue = " << queueBytes[hostId]
             << " bytes" << endl;
     
-    // //NEWADDITION
-    // // Filter candidates that cannot fit a valid DATA + REPORT + guard slot.
-    // const SimTime availableWindow = rightLimit - horizonLS;
-    // std::vector<int> viableCandidates;
+    //NEWADDITION
+    // Filter candidates that cannot fit a valid DATA + REPORT + guard slot.
+
+    const SimTime availableWindow = rightLimit - horizonLS;
+    std::vector<int> viableCandidates;
+
+    for (int candidateId : candidates)
+    {
+        if (candidateId == hostId)
+            continue;
     
-    // for (int candidateId : candidates)
-    // {
-    //     if (candidateId == hostId)
-    //         continue;
+        const long expectedGrantBytes =
+            alignedGrantBytes(queueBytes[candidateId]);
     
-    //     const long expectedGrantBytes =
-    //         alignedGrantBytes(queueBytes[candidateId]);
+        const SimTime availableDataTime =
+            rightLimit - horizonLS - reportTxTime - guardTime;
     
-    //     const SimTime availableDataTime =
-    //         rightLimit - horizonLS - reportTxTime - guardTime;
+        if (availableDataTime <= SIMTIME_ZERO)
+            continue;
     
-    //     if (availableDataTime <= SIMTIME_ZERO)
-    //         continue;
+        const SimTime expectedDataTxTime =
+            secondsToSimTime(expectedGrantBytes * 8.0 / dataRate);
     
-    //     const SimTime expectedDataTxTime =
-    //         secondsToSimTime(expectedGrantBytes * 8.0 / dataRate);
+        if (expectedDataTxTime <= availableDataTime)
+            viableCandidates.push_back(candidateId);
+    }
     
-    //     if (expectedDataTxTime <= availableDataTime)
-    //         viableCandidates.push_back(candidateId);
-    // }
-    
-    // candidates = std::move(viableCandidates);
+    candidates = std::move(viableCandidates);
 
 
-    // if (candidates.empty())
-    // {
-    //     // Issue the Host's ordinary upstream grant here.
-    //     // Update the relevant scheduling state/horizon.
-    //     long grantBytes =
-    //     alignedGrantBytes(queueBytes[hostId]);
-    //     isScheduled[hostId] = true;
-    //     sendGrantForONU(hostId, grantBytes);
+    if (candidates.empty())
+    {
+        // Issue the Host's ordinary upstream grant here.
+        // Update the relevant scheduling state/horizon.
+        long grantBytes =
+        alignedGrantBytes(queueBytes[hostId]);
+        isScheduled[hostId] = true;
+        sendGrantForONU(hostId, grantBytes);
 
-    //     if (!scheduleMsg->isScheduled())
-    //         scheduleAt(simTime(), scheduleMsg);
+        if (!scheduleMsg->isScheduled())
+            scheduleAt(simTime(), scheduleMsg);
 
-    //     return false;
-    // }
-    // //NEWADDITION END
+        return false;
+    }
+    //NEWADDITION END
     
     const long hostGrantBytes = alignedGrantBytes(queueBytes[hostId]);
 
@@ -757,8 +795,9 @@ bool OLT::scheduleDynamicLocalSharing()
     // each DATA + REPORT + guard slot into the remaining LS window.
 
     // Reverse candidates: lowest reported bytes first.
-    //If we limit the no of contributors then its absolutely necessary to start from the lowest reported bytes First
-    std::reverse(candidates.begin(), candidates.end());
+    // std::reverse(candidates.begin(),candidates.end());
+    // If we limit the no of contributors then its absolutely necessary to start from the lowest reported bytes First
+    
     
 
     for (int candidateId : candidates)
@@ -771,9 +810,21 @@ bool OLT::scheduleDynamicLocalSharing()
     int contributorsScheduled = 0;
     
     deltaTLS =
-                    horizonUP
-                    - SimTime(125, SIMTIME_US)
+                    rightLimit
                     - horizonLS;
+
+    //GPT_ADDITION
+    const SimTime deltaTLSBeforeAllocation = deltaTLS;
+    //GPT_ADDITION_END
+
+    //Write deltaTLS and simTime to file
+    if (deltaTLSFile.is_open())
+    {
+        deltaTLSFile << now.dbl() << ","
+                    << deltaTLS.dbl()*1e6 << "\n";
+
+        deltaTLSFile.flush();
+    }
     for (int contributorId : candidates)
     {
         if (contributorId == hostId)
@@ -813,6 +864,11 @@ bool OLT::scheduleDynamicLocalSharing()
         const long grantBytes = std::min(
             alignedGrantBytes(queueBytes[contributorId]),
             alignedGrantBytes(timeCapacityBytes));
+        //Don't take if grantbytes are less than reported
+        //NEWADDITION
+        if(grantBytes < alignedGrantBytes(queueBytes[contributorId]))
+            continue;
+        //NEWADDITION END
 
         if (grantBytes < 0)
             continue;
@@ -873,7 +929,104 @@ bool OLT::scheduleDynamicLocalSharing()
         }
         EV_INFO << "Contributor eligibility cycle refreshed." << endl;
     }
+    
+    //Iterate again to look if we can accomodate somebody from next cycle
+    for (int contributorId : candidates)
+    {
+        if (contributorId == hostId)
+            continue;
+        if (isScheduled[contributorId])
+            continue;
 
+        if(deltaTLS < lowlimWindow || contributorsScheduled>=maxONUFullWindow)
+        {// Enforce the contributor limit.
+            if (contributorsScheduled >= maxContributors)
+                break;
+        }
+        const SimTime contributorDelay =
+            secondsToSimTime(rnToONUDelays[contributorId]);
+
+        // GATE: OLT->RN->ONU; DATA: ONU->RN.
+        const SimTime earliestSplitterArrival =
+            now + oltToRNSim + contributorDelay + contributorDelay;
+        const SimTime lsStartAtSplitter =
+            std::max(lsCursor, earliestSplitterArrival);
+
+        const SimTime remainingAtSplitter = rightLimit - lsStartAtSplitter;
+        const SimTime usableDataTime =
+            remainingAtSplitter - reportTxTime - guardTime;
+
+        if (usableDataTime <= SIMTIME_ZERO)
+        {
+            // EV_INFO << "No time left for another LS contributor; stopping group fit."
+            //         << endl;
+            break;
+        }
+
+        long timeCapacityBytes = static_cast<long>(
+            std::floor(dataRate * usableDataTime.dbl() / 8.0));
+        timeCapacityBytes -= timeCapacityBytes % packetSizeBytes;
+
+        const long grantBytes = std::min(
+            alignedGrantBytes(queueBytes[contributorId]),
+            alignedGrantBytes(timeCapacityBytes));
+
+        //Don't take if grantbytes are less than reported
+        //NEWADDITION
+        if(grantBytes < alignedGrantBytes(queueBytes[contributorId]))
+            continue;
+        //NEWADDITION END
+
+        if (grantBytes < 0)
+            continue;
+
+        SimTime delayAfterGrant =
+            lsStartAtSplitter - now - oltToRNSim
+            - contributorDelay - contributorDelay;
+        if (delayAfterGrant < SIMTIME_ZERO)
+            delayAfterGrant = SIMTIME_ZERO;
+
+        const SimTime dataTxTime =
+            secondsToSimTime(grantBytes * 8.0 / dataRate);
+        const SimTime contributorSlotDuration =
+            dataTxTime + reportTxTime;
+
+        // Commit the contributor's REPORT to this LS reservation.
+        isScheduled[contributorId] = true;
+        RemainingIncycle[contributorId] = false;
+        committedContributors.push_back(contributorId);
+
+        sendGrantMessage(
+            contributorId,
+            grantBytes,
+            1,
+            hostId,
+            contributorSlotDuration.dbl(),
+            delayAfterGrant,
+            DelayExperiencedByPacket
+        );
+
+        const SimTime reportArrivalAtHost =
+            lsStartAtSplitter + contributorSlotDuration + hostDelay;
+        latestLSArrivalAtHost =
+            std::max(latestLSArrivalAtHost, reportArrivalAtHost);
+
+        expectedForwardBytes += grantBytes + reportSizeBytes;
+        lsCursor = lsStartAtSplitter + contributorSlotDuration + guardTime;
+
+        EV_INFO << "Dynamic LS contributor ONU " << contributorId
+                << "\nGrant = " << grantBytes << " bytes"
+                << "\nLS start at Splitter = " << lsStartAtSplitter
+                << "\nSlot duration (DATA + REPORT) = "
+                << contributorSlotDuration
+                << "\nLS reservation end = " << lsCursor
+                << endl;
+        contributorsScheduled++;
+    }
+
+    
+
+    
     // A Host-only reservation is not Local Sharing. Leave its REPORT
     // available if no contributor could fit in this LS window.
     if (committedContributors.empty())
@@ -907,6 +1060,22 @@ bool OLT::scheduleDynamicLocalSharing()
         secondsToSimTime(hostGrantBytes * 8.0 / dataRate);
     const SimTime forwardingTime =
         secondsToSimTime(expectedForwardBytes * 8.0 / dataRate);
+
+    //GPT_ADDITION
+    const SimTime deltaTLSMinusForwardingTime =
+        deltaTLSBeforeAllocation - forwardingTime;
+
+    if (localSharingTimingFile.is_open())
+    {
+        localSharingTimingFile
+            << now.dbl() << ","
+            << hostOwnDataTime.dbl() << ","
+            << contributorsScheduled << ","
+            << deltaTLSMinusForwardingTime.dbl() << "\n";
+        localSharingTimingFile.flush();
+    }
+    //GPT_ADDITION_END
+
     const SimTime hostFirstArrivalAtOLT =
         hostSendStart + hostUpstreamPropagation;
 
@@ -1130,6 +1299,12 @@ void OLT::finish()
 
     if (deltaTLSFile.is_open())
         deltaTLSFile.close();
+
+    //GPT_ADDITION
+    if (localSharingTimingFile.is_open())
+        localSharingTimingFile.close();
+    //GPT_ADDITION_END
+
     // ----------------------------------------
     // Record final DATA packet statistics
     // ----------------------------------------
@@ -1146,6 +1321,21 @@ void OLT::finish()
         "Total DATA Packets Received",
         totalDataPacketsReceived
     );
+
+    //GPT_ADDITION
+    recordScalar(
+        "Total Normal Upstreams Scheduled",
+        normalUpstreamsScheduled
+    );
+    //GPT_ADDITION_END
+
+    //GPT_ADDITION
+    recordScalar(
+        "Total Upstream Guard Intervals Scheduled",
+        totalUpstreamGuardsScheduled
+    );
+    //GPT_ADDITION_END
+
     EV_WARN << "OLT::finish() called at " << simTime() << endl;
     recordScalar(
         "Mean DATA Packet Delay (s)",
@@ -1155,6 +1345,14 @@ void OLT::finish()
     EV_INFO << "\n========== FINAL DATA STATISTICS =========="
             << "\nTotal DATA packets received = "
             << totalDataPacketsReceived
+            //GPT_ADDITION
+            << "\nTotal normal upstreams scheduled = "
+            << normalUpstreamsScheduled
+            //GPT_ADDITION_END
+            //GPT_ADDITION
+            << "\nTotal upstream guard intervals scheduled = "
+            << totalUpstreamGuardsScheduled
+            //GPT_ADDITION_END
             << "\nMean DATA packet delay = "
             << meanDelaySeconds * 1e6
             << " us"

@@ -27,7 +27,7 @@ class ONU : public cSimpleModule
     double moff = 0.0;
     double paretoA = 1e-12;
     double paretoB = 1.0;
-    double alphaOn = 1.2;
+    double alphaOn = 1.5;
     double alphaOff = 1.4;
     
     cPacket *pendingReport = nullptr;
@@ -163,7 +163,7 @@ void ONU::initialize()
         throw cRuntimeError("Cannot open %s", turnaroundFilename.c_str());
 
     reportTurnaroundFile
-        << "onuId,reportedBytes,reportTxStart_s,gateArrival_s,turnAroundTime_s\n";
+        << "onuId,reportedBytes,receivedGrantBytes,reportTxStart_s,gateArrival_s,turnAroundTime_s\n";
 }
 
 
@@ -561,6 +561,8 @@ void ONU::handleMessage(cMessage *msg)
         // Record the first GATE addressed to this ONU after REPORT transmission.
         if (awaitingGateForReport)
         {
+            const long receivedGrantBytes =
+                msg->par("grantBytes").longValue();
             const simtime_t gateArrival = simTime();
             const simtime_t turnAroundTime =
                 gateArrival - currentReportTxStart;
@@ -568,6 +570,7 @@ void ONU::handleMessage(cMessage *msg)
             reportTurnaroundFile
                 << par("onuId").intValue() << ","
                 << currentReportedBytes << ","
+                << receivedGrantBytes << ","
                 << currentReportTxStart.dbl() << ","
                 << gateArrival.dbl() << ","
                 << turnAroundTime.dbl() << "\n";
@@ -576,6 +579,7 @@ void ONU::handleMessage(cMessage *msg)
             EV_INFO << "ONU " << par("onuId").intValue()
                     << " REPORT-to-GATE turnaround"
                     << " | Reported bytes = " << currentReportedBytes
+                    << " | Received grant = " << receivedGrantBytes << " bytes"
                     << " | REPORT TX start = " << currentReportTxStart
                     << " | GATE arrival = " << gateArrival
                     << " | Turnaround = " << turnAroundTime
@@ -617,7 +621,8 @@ void ONU::handleMessage(cMessage *msg)
             );
         }
 
-        if (grantActive || waitingToSendReport || deferredGrant != nullptr)
+        if ((grantActive && !hostPostReportActive) ||
+            waitingToSendReport || deferredGrant != nullptr)
         {
             long long onuId =
                 (long long)par("onuId").intValue();
@@ -846,6 +851,16 @@ void ONU::handleMessage(cMessage *msg)
                     << " | Remaining grant = " << grantBitsRemaining
                     << " bits"
                     << endl;
+        }
+
+        // The Host's REPORT temporarily releases grantActive so a new GATE
+        // can be deferred while the previous Local Sharing work is drained.
+        // Resume the old grant before sending the Host's own DATA burst.
+        if (grantMode == 2 &&
+            hostReportSentBeforeData &&
+            hostPostReportActive)
+        {
+            grantActive = true;
         }
 
 
